@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Котолёт: ягодный забег</title>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background: #a9eaff;
+      touch-action: none;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game" aria-label="Котолёт: ягодный забег"></canvas>
+
+  <script>
+    "use strict";
+
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+
+    const W = 420;
+    const H = 760;
+    const lanes = [105, 210, 315];
+
+    let scale = 1;
+    let ox = 0;
+    let oy = 0;
+    let dpr = 1;
+    let ysdk = null;
+
+    let state = "menu";
+    let score = 0;
+    let best = loadBest();
+    let lives = 3;
+    let playerLane = 1;
+    let items = [];
+    let spawnTimer = 0;
+    let elapsed = 0;
+    let invincible = 0;
+    let lastTime = 0;
+    let pointerStart = null;
+
+    function loadBest() {
+      try {
+        return Number(localStorage.getItem("kotolyotBest") || 0);
+      } catch (_) {
+        return 0;
+      }
+    }
+
+    function saveBest(value) {
+      try {
+        localStorage.setItem("kotolyotBest", String(value));
+      } catch (_) {
+        // Игра работает и без сохранения рекорда.
+      }
+    }
+
+    function resize() {
+      dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+
+      canvas.width = Math.round(window.innerWidth * dpr);
+      canvas.height = Math.round(window.innerHeight * dpr);
+
+      scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+      ox = (window.innerWidth - W * scale) / 2;
+      oy = (window.innerHeight - H * scale) / 2;
+    }
+
+    window.addEventListener("resize", resize);
+    resize();
+
+    function initSDK() {
+      if (!window.YaGames) return;
+
+      window.YaGames.init()
+        .then(function (sdk) {
+          ysdk = sdk;
+
+          try {
+            if (ysdk.features && ysdk.features.LoadingAPI) {
+              ysdk.features.LoadingAPI.ready();
+            }
+          } catch (_) {
+            // SDK не обязателен для локальной игры.
+          }
+        })
+        .catch(function () {
+          ysdk = null;
+        });
+    }
+
+    function loadYandexSDK() {
+      // Не загружаем SDK при открытии файла с компьютера.
+      if (window.location.protocol === "file:") return;
+
+      const script = document.createElement("script");
+      script.src = "/sdk.js";
+      script.async = true;
+      script.onload = initSDK;
+      script.onerror = function () {
+        ysdk = null;
+      };
+
+      document.head.appendChild(script);
+    }
+
+    function gameplayStart() {
+      try {
+        if (ysdk && ysdk.features && ysdk.features.GameplayAPI) {
+          ysdk.features.GameplayAPI.start();
+        }
+      } catch (_) {
+        // Игра продолжает работать без SDK.
+      }
+    }
+
+    function gameplayStop() {
+      try {
+        if (ysdk && ysdk.features && ysdk.features.GameplayAPI) {
+          ysdk.features.GameplayAPI.stop();
+        }
+      } catch (_) {
+        // Игра продолжает работать без SDK.
+      }
+    }
+
+    function roundedRect(x, y, w, h, r, color) {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+
+      if (typeof ctx.roundRect === "function") {
+        ctx.roundRect(x, y, w, h, r);
+      } else {
+        const radius = Math.min(r, w / 2, h / 2);
+
+        ctx.moveTo(x + radius, y);
+        ctx.arcTo(x + w, y, x + w, y + h, radius);
+        ctx.arcTo(x + w, y + h, x, y + h, radius);
+        ctx.arcTo(x, y + h, x, y, radius);
+        ctx.arcTo(x, y, x + w, y, radius);
+        ctx.closePath();
+      }
+
+      ctx.fill();
+    }
+
+    function text(str, x, y, size, color, align, weight) {
+      ctx.font = `${weight || 800} ${size}px system-ui, sans-serif`;
+      ctx.fillStyle = color || "#26345b";
+      ctx.textAlign = align || "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(str, x, y);
+    }
+
+    function button(label, x, y, w, h, color, size) {
+      roundedRect(
+        x - w / 2,
+        y - h / 2 + 5,
+        w,
+        h,
+        22,
+        "rgba(48,63,101,.16)"
+      );
+
+      roundedRect(
+        x - w / 2,
+        y - h / 2,
+        w,
+        h,
+        22,
+        color || "#ffbd4a"
+      );
+
+      text(label, x, y, size || 22, "#26345b");
+    }
+
+    function random(min, max) {
+      return Math.random() * (max - min) + min;
+    }
+
+    function startGame() {
+      score = 0;
+      lives = 3;
+      playerLane = 1;
+      items = [];
+      elapsed = 0;
+      spawnTimer = 0.5;
+      invincible = 0;
+      state = "playing";
+      gameplayStart();
+    }
+
+    function endGame() {
+      state = "over";
+      gameplayStop();
+
+      if (score > best) {
+        best = score;
+        saveBest(best);
+      }
+    }
+
+    function pauseGame() {
+      if (state === "playing") {
+        state = "paused";
+        gameplayStop();
+      }
+    }
+
+    function resumeGame() {
+      if (state === "paused") {
+        state = "playing";
+        gameplayStart();
+      }
+    }
+
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden && state === "playing") {
+        pauseGame();
+      }
+    });
+
+    function offerRevive() {
+      const adv = ysdk && ysdk.adv;
+
+      if (!adv || typeof adv.showRewardedVideo !== "function") {
+        window.alert(
+          "Просмотр рекламы будет доступен после загрузки игры на Яндекс Игры и подключения монетизации."
+        );
+        return;
+      }
+
+      let earned = false;
+      state = "ad";
+      gameplayStop();
+
+      adv.showRewardedVideo({
+        callbacks: {
+          onRewarded: function () {
+            earned = true;
+          },
+          onClose: function () {
+            if (earned) {
+              lives = 1;
+              invincible = 2.5;
+              state = "playing";
+              gameplayStart();
+            } else {
+              state = "over";
+            }
+          },
+          onError: function () {
+            state = "over";
+          }
+        }
+      });
+    }
+
+    function movePlayer(direction) {
+      playerLane = Math.max(0, Math.min(2, playerLane + direction));
+    }
+
+    canvas.addEventListener("pointerdown", function (e) {
+      pointerStart = {
+        x: e.clientX,
+        y: e.clientY
+      };
+    });
+
+    canvas.addEventListener("pointerup", function (e) {
+      if (!pointerStart) return;
+
+      const start = pointerStart;
+      pointerStart = null;
+
+      const dx = e.clientX - start.x;
+      const dy = e.clientY - start.y;
+      const x = (e.clientX - ox) / scale;
+      const y = (e.clientY - oy) / scale;
+
+      if (Math.abs(dx) > 35 || Math.abs(dy) > 45) {
+        if (state === "playing" && Math.abs(dx) > Math.abs(dy)) {
+          movePlayer(dx < 0 ? -1 : 1);
+        }
+        return;
+      }
+
+      if (state === "menu") {
+        if (y > 450 && y < 590) {
+          startGame();
+        }
+      } else if (state === "playing") {
+        if (x > 330 && y < 110) {
+          pauseGame();
+        } else if (y > 150) {
+          movePlayer(x < W / 2 ? -1 : 1);
+        }
+      } else if (state === "paused") {
+        if (y > 385 && y < 460) {
+          resumeGame();
+        } else if (y > 460 && y < 530) {
+          state = "menu";
+        }
+      } else if (state === "over") {
+        if (y > 475 && y < 540) {
+          offerRevive();
+        } else if (y > 540 && y < 620) {
+          startGame();
+        }
+      }
+    });
+
+    window.addEventListener("keydown", function (e) {
+      const key = e.key.toLowerCase();
+
+      if (state === "playing") {
+        if (e.key === "ArrowLeft" || key === "a") {
+          movePlayer(-1);
+        } else if (e.key === "ArrowRight" || key === "d") {
+          movePlayer(1);
+        } else if (e.key === "Escape") {
+          pauseGame();
+        }
+      } else if (
+        state === "menu" &&
+        (e.key === "Enter" || e.key === " ")
+      ) {
+        startGame();
+      } else if (
+        state === "paused" &&
+        (e.key === "Enter" || e.key === " ")
+      ) {
+        resumeGame();
+      }
+    });
+
+    function update(dt) {
+      if (state !== "playing") return;
+
+      elapsed += dt;
+      invincible = Math.max(0, invincible - dt);
+      spawnTimer -= dt;
+
+      if (spawnTimer <= 0) {
+        const lane = Math.floor(Math.random() * 3);
+
+        items.push({
+          lane: lane,
+          y: -35,
+          type: Math.random() < 0.28 ? "cloud" : "berry",
+          checked: false
+        });
+
+        spawnTimer = Math.max(0.38, 0.78 - elapsed * 0.004) + random(0, 0.22);
+      }
+
+      const speed = 270 + Math.min(220, elapsed * 4);
+
+      for (const item of items) {
+        item.y += speed * dt;
+
+        if (item.checked || item.y < 570 || item.y > 700) continue;
+        if (item.lane !== playerLane) continue;
+
+        item.checked = true;
+
+        if (item.type === "berry") {
+          score += 1;
+        } else if (invincible <= 0) {
+          lives -= 1;
+          invincible = 1.2;
+
+          if (lives <= 0) {
+            endGame();
+            break;
+          }
+        }
+      }
+
+      items = items.filter(function (item) {
+        return item.y < 820;
+      });
+    }
+
+    function drawBackground() {
+      const sky = ctx.createLinearGradient(0, 0, 0, H);
+      sky.addColorStop(0, "#9be5ff");
+      sky.addColorStop(1, "#f8eaff");
+
+      ctx.fillStyle = sky;
+      ctx.fillRect(0, 0, W, H);
+
+      for (let i = 0; i < 5; i++) {
+        const x = (i * 107 + 25) % W;
+        const y = 145 + (i % 3) * 115;
+        text("☁️", x, y, 48, "#ffffff");
+      }
+
+      ctx.fillStyle = "#b9f0c5";
+      ctx.beginPath();
+      ctx.ellipse(210, 720, 330, 100, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function drawTrack() {
+      roundedRect(48, 150, 324, 540, 34, "rgba(255,255,255,.58)");
+
+      ctx.strokeStyle = "rgba(116,159,201,.30)";
+      ctx.lineWidth = 3;
+      ctx.setLineDash([12, 14]);
+
+      ctx.beginPath();
+      ctx.moveTo(156, 175);
+      ctx.lineTo(156, 680);
+      ctx.moveTo(264, 175);
+      ctx.lineTo(264, 680);
+      ctx.stroke();
+
+      ctx.setLineDash([]);
+    }
+
+    function drawHUD() {
+      roundedRect(22, 22, 190, 72, 22, "rgba(255,255,255,.82)");
+      text("🍓 " + score, 48, 48, 24, "#26345b", "left");
+      text("Рекорд: " + best, 48, 76, 14, "#53627e", "left", 700);
+
+      roundedRect(245, 22, 110, 72, 22, "rgba(255,255,255,.82)");
+      text("💛".repeat(Math.max(0, lives)), 300, 58, 22);
+
+      roundedRect(360, 28, 42, 42, 14, "#ffffff");
+      text("Ⅱ", 381, 49, 20);
+    }
+
+    function drawPlayer() {
+      if (invincible > 0 && Math.floor(invincible * 10) % 2 === 0) {
+        return;
+      }
+
+      text("🐱", lanes[playerLane], 625, 58);
+    }
+
+    function draw() {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, canvas.width / dpr, canvas.height / dpr);
+
+      ctx.setTransform(
+        dpr * scale,
+        0,
+        0,
+        dpr * scale,
+        dpr * ox,
+        dpr * oy
+      );
+
+      drawBackground();
+      drawTrack();
+
+      if (state === "playing" || state === "paused" || state === "ad") {
+        drawHUD();
+
+        for (const item of items) {
+          if (!item.checked) {
+            text(
+              item.type === "berry" ? "🍓" : "🌩️",
+              lanes[item.lane],
+              item.y,
+              36
+            );
+          }
+        }
+
+        drawPlayer();
+      }
+
+      if (state === "menu") {
+        text("🐱", 210, 235, 100);
+        text("КОТОЛЁТ", 210, 330, 42, "#26345b");
+        text("ЯГОДНЫЙ ЗАБЕГ", 210, 374, 20, "#53627e");
+        text("Собирай ягоды и уворачивайся от туч!", 210, 425, 15, "#53627e", "center", 700);
+        button("ИГРАТЬ", 210, 520, 230, 72);
+        text("Свайп ← → или нажимай по сторонам экрана", 210, 603, 13, "#53627e", "center", 650);
+        text("Рекорд: " + best, 210, 648, 16, "#53627e");
+      }
+
+      if (state === "paused") {
+        roundedRect(42, 265, 336, 250, 30, "rgba(255,255,255,.95)");
+        text("Пауза", 210, 322, 34);
+        button("ПРОДОЛЖИТЬ", 210, 420, 245, 66);
+        text("В меню", 210, 490, 16, "#53627e");
+      }
+
+      if (state === "over") {
+        roundedRect(34, 215, 352, 390, 32, "rgba(255,255,255,.94)");
+        text("🐱", 210, 275, 65);
+        text("Забег окончен!", 210, 340, 30);
+        text("Ягод собрано: " + score, 210, 390, 20, "#53627e");
+        text("Рекорд: " + best, 210, 423, 16, "#53627e");
+        button("ВИДЕО → +1 ЖИЗНЬ", 210, 505, 280, 62, "#b7ecff", 17);
+        button("ЕЩЁ РАЗ", 210, 575, 230, 58);
+      }
+    }
+
+    function frame(time) {
+      const dt = Math.min(0.04, (time - lastTime) / 1000 || 0);
+      lastTime = time;
+
+      update(dt);
+      draw();
+
+      requestAnimationFrame(frame);
+    }
+
+    loadYandexSDK();
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
